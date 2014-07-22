@@ -218,15 +218,25 @@ func unlockHeldLocks(stop chan struct{}, wg *sync.WaitGroup) {
 }
 
 func runDaemon(args []string) int {
-	shutdown := make(chan os.Signal, 1)
 	stop := make(chan struct{}, 1)
-	go func() {
-		<-shutdown
-		fmt.Fprintln(os.Stderr, "Received interrupt/termination signal - shutting down.")
-		close(stop)
-		os.Exit(0)
-	}()
+	rebooting := make(chan struct{}, 1)
+	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
+
+	var wg sync.WaitGroup
+	go func() {
+		// Wait for one of two events, then stop all initialization goroutines:
+		// 1. shutdown signal received
+		// 2. about to enter the reboot loop
+		select {
+		case <-shutdown:
+			close(stop)
+			fmt.Fprintln(os.Stderr, "Received interrupt/termination signal - shutting down.")
+			os.Exit(0)
+		case <-rebooting:
+			close(stop)
+		}
+	}()
 
 	strategy := os.ExpandEnv("${REBOOT_STRATEGY}")
 	if strategy == "" {
@@ -245,7 +255,6 @@ func runDaemon(args []string) int {
 		return 1
 	}
 
-	var wg sync.WaitGroup
 	if strategy != StrategyReboot {
 		wg.Add(1)
 		go unlockHeldLocks(stop, &wg)
@@ -271,7 +280,7 @@ func runDaemon(args []string) int {
 		<-ch
 	}
 
-	close(stop)
+	close(rebooting)
 	wg.Wait()
 
 	return r.reboot()
